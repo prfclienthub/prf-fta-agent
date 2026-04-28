@@ -175,11 +175,12 @@ async function loginToFTA(username, password) {
       console.log('📸 Screenshot after login click taken');
     }
 
-    // Step 4: Fill email
+    // Step 4 onwards: Fill form quickly — CAPTCHA read happens LAST to minimize expiry risk
+    
+    // Fill email first (fast — no delay)
     const emailField = await page.$('input[type="email"]') ||
                        await page.$('input[placeholder*="E-Mail"]') ||
-                       await page.$('input[placeholder*="email"]') ||
-                       await page.$('input[placeholder*="Email"]') ||
+                       await page.$('input[placeholder*="mail"]') ||
                        await page.$('input[type="text"]');
 
     if (!emailField) {
@@ -187,30 +188,25 @@ async function loginToFTA(username, password) {
       throw new Error('Email field not found. Page: ' + pageText);
     }
     await emailField.click({ clickCount: 3 });
-    await emailField.type(ftaUser, { delay: 100 });
+    await emailField.type(ftaUser, { delay: 30 }); // fast typing
     console.log('✅ Email filled');
 
-    // Step 5: Fill password
+    // Fill password fast
     const passwordField = await page.$('input[type="password"]');
     if (!passwordField) throw new Error('Password field not found');
     await passwordField.click({ clickCount: 3 });
-    await passwordField.type(ftaPass, { delay: 100 });
+    await passwordField.type(ftaPass, { delay: 30 }); // fast typing
     console.log('✅ Password filled');
 
-    // Step 6: Read and fill CAPTCHA using Claude Vision
-    await page.waitForTimeout(1500);
-
+    // Find CAPTCHA input field
     const captchaInput = await page.$('input[placeholder*="Security"]') ||
                          await page.$('input[placeholder*="security"]') ||
                          await page.$('input[placeholder*="Code"]') ||
-                         await page.$('input[placeholder*="code"]') ||
-                         await page.$('input[id*="captcha"]') ||
-                         await page.$('input[id*="security"]');
+                         await page.$('input[placeholder*="code"]');
 
     if (captchaInput) {
-      console.log('🔍 Security code field found — taking screenshot for Claude Vision...');
-
-      // Take full page screenshot — most reliable approach
+      // Read CAPTCHA NOW (just before submitting to minimize expiry)
+      console.log('🔍 Reading CAPTCHA with Claude Vision...');
       const fullBase64 = await page.screenshot({ encoding: 'base64' });
 
       let captchaCode = null;
@@ -223,13 +219,13 @@ async function loginToFTA(username, password) {
             'anthropic-version': '2023-06-01'
           },
           body: JSON.stringify({
-            model: 'claude-opus-4-6',
+            model: 'claude-haiku-4-5-20251001', // Use Haiku — much faster than Opus
             max_tokens: 20,
             messages: [{
               role: 'user',
               content: [
                 { type: 'image', source: { type: 'base64', media_type: 'image/png', data: fullBase64 } },
-                { type: 'text', text: 'In this UAE FTA EmaraTax login page, there is a box labeled "Enter Security Code" with a CAPTCHA image next to it showing some digits. What are the digits shown in that CAPTCHA image? Reply with ONLY those digits, nothing else.' }
+                { type: 'text', text: 'In this UAE FTA EmaraTax login page, find the security code CAPTCHA image next to "Enter Security Code". Reply with ONLY those digits, nothing else.' }
               ]
             }]
           })
@@ -237,91 +233,83 @@ async function loginToFTA(username, password) {
         const data = await response.json();
         const raw = data.content?.[0]?.text?.trim() || '';
         captchaCode = raw.replace(/[^0-9]/g, '');
-        console.log('🤖 Claude CAPTCHA result - raw:', raw, '→ digits:', captchaCode);
+        console.log('🤖 CAPTCHA:', raw, '→', captchaCode);
       } catch(e) {
         console.error('Claude Vision error:', e.message);
       }
 
       if (captchaCode && captchaCode.length >= 4) {
         await captchaInput.click({ clickCount: 3 });
-        await captchaInput.type(captchaCode, { delay: 150 });
-        console.log('✅ Security code filled:', captchaCode);
-      } else {
-        console.log('⚠️ Could not read security code, length:', captchaCode?.length, 'value:', captchaCode);
+        await captchaInput.type(captchaCode, { delay: 30 });
+        console.log('✅ CAPTCHA filled:', captchaCode);
       }
-    } else {
-      console.log('ℹ️ No security code field found — skipping CAPTCHA step');
     }
 
-    // Step 7: Click Login button — multiple strategies for Angular portal
-    await page.waitForTimeout(500);
-
-    let loginSubmitted = false;
-
-    // Strategy 1: XPath by exact button text
-    try {
-      const [btn] = await page.$x('//button[contains(text(),"Login") or contains(text(),"login") or contains(text(),"LOG IN")]');
-      if (btn) {
-        await btn.click();
-        loginSubmitted = true;
-        console.log('✅ Login clicked via XPath text search');
+    // Click Login button immediately — no delay
+    const loginClicked = await page.evaluate(() => {
+      for (const el of document.querySelectorAll('button')) {
+        if (el.innerText.trim().toLowerCase() === 'login') {
+          el.click();
+          return true;
+        }
       }
-    } catch(e) { console.log('XPath click failed:', e.message); }
+      const sub = document.querySelector('button[type="submit"], input[type="submit"]');
+      if (sub) { sub.click(); return true; }
+      return false;
+    });
 
-    // Strategy 2: Find by class or type and click via evaluate
-    if (!loginSubmitted) {
-      loginSubmitted = await page.evaluate(() => {
-        const selectors = [
-          'button[type="submit"]',
-          'input[type="submit"]',
-          'button.btn-login',
-          'button.login',
-          'button.btn-primary',
-          '.login-btn button',
-          'form button:last-child',
-        ];
-        for (const sel of selectors) {
-          const el = document.querySelector(sel);
-          if (el) { el.click(); return true; }
-        }
-        // Find any button whose visible text is Login
-        for (const el of document.querySelectorAll('button')) {
-          if (el.innerText.trim().toLowerCase() === 'login') {
-            el.click();
-            return true;
-          }
-        }
-        return false;
-      });
-      if (loginSubmitted) console.log('✅ Login clicked via evaluate');
+    if (!loginClicked) {
+      // XPath fallback
+      const [xbtn] = await page.$x('//button[contains(text(),"Login")]');
+      if (xbtn) await xbtn.click();
     }
 
-    // Strategy 3: Tab to button and press Enter
-    if (!loginSubmitted) {
-      await page.keyboard.press('Tab');
-      await page.waitForTimeout(200);
-      await page.keyboard.press('Enter');
-      loginSubmitted = true;
-      console.log('✅ Tabbed to button and pressed Enter');
-    }
+    console.log('✅ Login submitted, waiting for response...');
 
-    console.log('Login submission attempted, loginSubmitted:', loginSubmitted);
-
-
-    // Step 6: Wait for navigation
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(3000);
-
+    // Wait for page to settle after login click
+    await page.waitForTimeout(4000);
     const finalUrl = page.url();
     console.log('📄 Final URL:', finalUrl);
 
-    if (finalUrl.includes('Logon') || finalUrl.includes('login') || finalUrl.includes('UAE_PASS')) {
-      // Still on login page — check error
-      const errText = await page.evaluate(() => {
-        const errEl = document.querySelector('[class*="error"], [class*="alert"], [class*="invalid"], [class*="wrong"]');
-        return errEl ? errEl.textContent.trim() : null;
-      });
-      throw new Error(errText || 'Login failed — still on login page. Check credentials.');
+    // Take screenshot to see what happened
+    const postLoginShot = await page.screenshot({ encoding: 'base64' });
+
+    // Check for error messages on the page
+    const pageStatus = await page.evaluate(() => {
+      // Get all visible text that might indicate errors
+      const errorSelectors = [
+        '[class*="error"]', '[class*="alert"]', '[class*="invalid"]',
+        '[class*="wrong"]', '[class*="message"]', '[class*="toast"]',
+        '[class*="notification"]', '[class*="warning"]', 'p[style*="color:red"]',
+        '.ng-trigger', '[role="alert"]'
+      ];
+      const errors = [];
+      for (const sel of errorSelectors) {
+        document.querySelectorAll(sel).forEach(el => {
+          const text = el.innerText?.trim();
+          if (text && text.length > 2 && text.length < 200) errors.push(text);
+        });
+      }
+      return {
+        url: window.location.href,
+        errors: [...new Set(errors)],
+        pageTitle: document.title,
+        bodyText: document.body.innerText.slice(0, 500)
+      };
+    });
+
+    console.log('📋 Page status after login:', JSON.stringify(pageStatus).slice(0, 400));
+
+    if (finalUrl.includes('Logon') || finalUrl.includes('login')) {
+      const errorMsg = pageStatus.errors.length > 0
+        ? pageStatus.errors.join(' | ')
+        : 'Login failed — check email and password are correct for eservices.tax.gov.ae';
+      return {
+        success: false,
+        error: errorMsg,
+        screenshot: 'data:image/png;base64,' + postLoginShot,
+        debug: pageStatus
+      };
     }
 
     isLoggedIn = true;
