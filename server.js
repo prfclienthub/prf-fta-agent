@@ -19,21 +19,23 @@ async function readCaptcha(captchaBase64) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-opus-4-5',
-        max_tokens: 100,
+        model: 'claude-opus-4-6',
+        max_tokens: 50,
         messages: [{
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: 'image/png', data: captchaBase64 } },
-            { type: 'text', text: 'This is a CAPTCHA image. Read the security code numbers/letters shown and reply with ONLY the code, nothing else. No spaces, no explanation.' }
+            { type: 'text', text: 'Look at this CAPTCHA image carefully. It contains ONLY digits (numbers 0-9). Read the digits and reply with ONLY those digits, nothing else. No letters, no spaces, no explanation. Just the numbers.' }
           ]
         }]
       })
     });
     const data = await response.json();
-    const code = data.content?.[0]?.text?.trim() || '';
-    console.log('🤖 Claude read CAPTCHA:', code);
-    return code;
+    // Extract only digits from response
+    const raw = data.content?.[0]?.text?.trim() || '';
+    const code = raw.replace(/[^0-9]/g, ''); // strip any non-digits
+    console.log('🤖 Claude CAPTCHA raw:', raw, '→ digits only:', code);
+    return code || null;
   } catch(e) {
     console.error('CAPTCHA read failed:', e.message);
     return null;
@@ -196,35 +198,86 @@ async function loginToFTA(username, password) {
     console.log('✅ Password filled');
 
     // Step 6: Read and fill CAPTCHA using Claude Vision
-    await page.waitForTimeout(1000);
-    const captchaImg = await page.$('img') ||
-                       await page.$('[class*="captcha"] img') ||
-                       await page.$('canvas');
+    await page.waitForTimeout(1500);
 
-    if (captchaImg) {
-      console.log('🔍 CAPTCHA detected — using Claude Vision to read it...');
-      // Screenshot just the captcha image
-      const captchaBase64 = await captchaImg.screenshot({ encoding: 'base64' });
-      const captchaCode   = await readCaptcha(captchaBase64);
+    // Find the CAPTCHA number image (the image showing digits like 747104)
+    const captchaImgs = await page.$$('img');
+    let captchaImg = null;
+    for (const img of captchaImgs) {
+      const box = await img.boundingBox();
+      // CAPTCHA images are typically wide and short — look for that shape
+      if (box && box.width > 60 && box.width < 300 && box.height > 20 && box.height < 80) {
+        captchaImg = img;
+        console.log('🔍 Found CAPTCHA image:', box.width, 'x', box.height);
+        break;
+      }
+    }
 
-      if (captchaCode) {
-        const captchaInput = await page.$('input[placeholder*="Security"]') ||
-                             await page.$('input[placeholder*="security"]') ||
-                             await page.$('input[placeholder*="captcha"]') ||
-                             await page.$('input[placeholder*="Code"]') ||
-                             await page.$('input[id*="captcha"]');
-        if (captchaInput) {
-          await captchaInput.click({ clickCount: 3 });
-          await captchaInput.type(captchaCode, { delay: 100 });
-          console.log('✅ CAPTCHA filled:', captchaCode);
-        } else {
-          console.log('⚠️ CAPTCHA input field not found');
+    if (!captchaImg) {
+      // Fallback: take full page screenshot and let Claude find the CAPTCHA
+      captchaImg = null;
+    }
+
+    const captchaInput = await page.$('input[placeholder*="Security"]') ||
+                         await page.$('input[placeholder*="security"]') ||
+                         await page.$('input[placeholder*="Code"]') ||
+                         await page.$('input[placeholder*="code"]') ||
+                         await page.$('input[id*="captcha"]') ||
+                         await page.$('input[id*="security"]');
+
+    if (captchaInput) {
+      console.log('🔍 CAPTCHA input found — reading code with Claude Vision...');
+
+      let captchaCode = null;
+
+      if (captchaImg) {
+        // Screenshot just the CAPTCHA image
+        const captchaBase64 = await captchaImg.screenshot({ encoding: 'base64' });
+        captchaCode = await readCaptcha(captchaBase64);
+      }
+
+      if (!captchaCode) {
+        // Fallback: screenshot full page area around input
+        const fullBase64 = await page.screenshot({ encoding: 'base64' });
+        // Ask Claude to find and read the security code from the full page
+        try {
+          const response = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': process.env.ANTHROPIC_API_KEY,
+              'anthropic-version': '2023-06-01'
+            },
+            body: JSON.stringify({
+              model: 'claude-opus-4-6',
+              max_tokens: 50,
+              messages: [{
+                role: 'user',
+                content: [
+                  { type: 'image', source: { type: 'base64', media_type: 'image/png', data: fullBase64 } },
+                  { type: 'text', text: 'This is a UAE FTA portal login page. There is a security code / CAPTCHA showing some digits next to an "Enter Security Code" input field. Find those digits and reply with ONLY those digits. Nothing else.' }
+                ]
+              }]
+            })
+          });
+          const data = await response.json();
+          const raw = data.content?.[0]?.text?.trim() || '';
+          captchaCode = raw.replace(/[^0-9]/g, '');
+          console.log('🤖 Full-page CAPTCHA read:', raw, '→', captchaCode);
+        } catch(e) {
+          console.error('Full-page CAPTCHA read failed:', e.message);
         }
+      }
+
+      if (captchaCode && captchaCode.length >= 4) {
+        await captchaInput.click({ clickCount: 3 });
+        await captchaInput.type(captchaCode, { delay: 150 });
+        console.log('✅ CAPTCHA filled:', captchaCode);
       } else {
-        console.log('⚠️ Could not read CAPTCHA — trying without it');
+        console.log('⚠️ Could not read CAPTCHA code — length:', captchaCode?.length);
       }
     } else {
-      console.log('ℹ️ No CAPTCHA detected');
+      console.log('ℹ️ No CAPTCHA input field found');
     }
 
     // Step 7: Click Login button
