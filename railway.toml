@@ -1,14 +1,9 @@
 [build]
-builder = "nixpacks"
-
-[build.nixpacksPlan.phases.setup]
-nixPkgs = ["nodejs_18", "chromium", "nss", "freetype", "harfbuzz", "ca-certificates", "ttf-opensans"]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "node server.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "on_failure"
-
-[deploy.variables]
-PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"
