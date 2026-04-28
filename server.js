@@ -52,7 +52,8 @@ app.use(express.json());
 // ── BROWSER STATE ─────────────────────────────────────────────────────────────
 let browser     = null;
 let page        = null;
-let isLoggedIn  = false;
+let isLoggedIn    = false;
+let isLoggingIn   = false; // prevent concurrent login attempts
 let currentFtaUser = null;
 let lastActivity = Date.now();
 
@@ -477,6 +478,10 @@ app.get('/', (req, res) => {
 
 // Login to FTA portal — credentials sent from portal, not stored on server
 app.post('/api/login', authenticate, async (req, res) => {
+  if (isLoggingIn) {
+    return res.json({ success: false, error: 'Login already in progress — please wait' });
+  }
+  isLoggingIn = true;
   try {
     const { username, password } = req.body || {};
     await launchBrowser();
@@ -484,6 +489,8 @@ app.post('/api/login', authenticate, async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  } finally {
+    isLoggingIn = false;
   }
 });
 
