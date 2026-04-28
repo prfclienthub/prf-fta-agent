@@ -1,9 +1,11 @@
-# Railway deployment configuration
 [build]
 builder = "nixpacks"
 
+[build.nixpacksPlan.phases.setup]
+nixPkgs = ["nodejs_18", "chromium", "nss", "freetype", "harfbuzz", "ca-certificates", "ttf-opensans"]
+
 [deploy]
-startCommand = "npm start"
+startCommand = "node server.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "on_failure"

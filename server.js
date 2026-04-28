@@ -6,7 +6,7 @@
 require('dotenv').config();
 const express    = require('express');
 const cors       = require('cors');
-const puppeteer  = require('puppeteer');
+const puppeteer  = require('puppeteer-core');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -31,6 +31,7 @@ async function launchBrowser() {
   console.log('🚀 Launching browser...');
   browser = await puppeteer.launch({
     headless: 'new',
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium' || '/usr/bin/chromium-browser',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
