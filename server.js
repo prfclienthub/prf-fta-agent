@@ -200,24 +200,6 @@ async function loginToFTA(username, password) {
     // Step 6: Read and fill CAPTCHA using Claude Vision
     await page.waitForTimeout(1500);
 
-    // Find the CAPTCHA number image (the image showing digits like 747104)
-    const captchaImgs = await page.$$('img');
-    let captchaImg = null;
-    for (const img of captchaImgs) {
-      const box = await img.boundingBox();
-      // CAPTCHA images are typically wide and short — look for that shape
-      if (box && box.width > 60 && box.width < 300 && box.height > 20 && box.height < 80) {
-        captchaImg = img;
-        console.log('🔍 Found CAPTCHA image:', box.width, 'x', box.height);
-        break;
-      }
-    }
-
-    if (!captchaImg) {
-      // Fallback: take full page screenshot and let Claude find the CAPTCHA
-      captchaImg = null;
-    }
-
     const captchaInput = await page.$('input[placeholder*="Security"]') ||
                          await page.$('input[placeholder*="security"]') ||
                          await page.$('input[placeholder*="Code"]') ||
@@ -226,58 +208,49 @@ async function loginToFTA(username, password) {
                          await page.$('input[id*="security"]');
 
     if (captchaInput) {
-      console.log('🔍 CAPTCHA input found — reading code with Claude Vision...');
+      console.log('🔍 Security code field found — taking screenshot for Claude Vision...');
+
+      // Take full page screenshot — most reliable approach
+      const fullBase64 = await page.screenshot({ encoding: 'base64' });
 
       let captchaCode = null;
-
-      if (captchaImg) {
-        // Screenshot just the CAPTCHA image
-        const captchaBase64 = await captchaImg.screenshot({ encoding: 'base64' });
-        captchaCode = await readCaptcha(captchaBase64);
-      }
-
-      if (!captchaCode) {
-        // Fallback: screenshot full page area around input
-        const fullBase64 = await page.screenshot({ encoding: 'base64' });
-        // Ask Claude to find and read the security code from the full page
-        try {
-          const response = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': process.env.ANTHROPIC_API_KEY,
-              'anthropic-version': '2023-06-01'
-            },
-            body: JSON.stringify({
-              model: 'claude-opus-4-6',
-              max_tokens: 50,
-              messages: [{
-                role: 'user',
-                content: [
-                  { type: 'image', source: { type: 'base64', media_type: 'image/png', data: fullBase64 } },
-                  { type: 'text', text: 'This is a UAE FTA portal login page. There is a security code / CAPTCHA showing some digits next to an "Enter Security Code" input field. Find those digits and reply with ONLY those digits. Nothing else.' }
-                ]
-              }]
-            })
-          });
-          const data = await response.json();
-          const raw = data.content?.[0]?.text?.trim() || '';
-          captchaCode = raw.replace(/[^0-9]/g, '');
-          console.log('🤖 Full-page CAPTCHA read:', raw, '→', captchaCode);
-        } catch(e) {
-          console.error('Full-page CAPTCHA read failed:', e.message);
-        }
+      try {
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': process.env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01'
+          },
+          body: JSON.stringify({
+            model: 'claude-opus-4-6',
+            max_tokens: 20,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: fullBase64 } },
+                { type: 'text', text: 'In this UAE FTA EmaraTax login page, there is a box labeled "Enter Security Code" with a CAPTCHA image next to it showing some digits. What are the digits shown in that CAPTCHA image? Reply with ONLY those digits, nothing else.' }
+              ]
+            }]
+          })
+        });
+        const data = await response.json();
+        const raw = data.content?.[0]?.text?.trim() || '';
+        captchaCode = raw.replace(/[^0-9]/g, '');
+        console.log('🤖 Claude CAPTCHA result - raw:', raw, '→ digits:', captchaCode);
+      } catch(e) {
+        console.error('Claude Vision error:', e.message);
       }
 
       if (captchaCode && captchaCode.length >= 4) {
         await captchaInput.click({ clickCount: 3 });
         await captchaInput.type(captchaCode, { delay: 150 });
-        console.log('✅ CAPTCHA filled:', captchaCode);
+        console.log('✅ Security code filled:', captchaCode);
       } else {
-        console.log('⚠️ Could not read CAPTCHA code — length:', captchaCode?.length);
+        console.log('⚠️ Could not read security code, length:', captchaCode?.length, 'value:', captchaCode);
       }
     } else {
-      console.log('ℹ️ No CAPTCHA input field found');
+      console.log('ℹ️ No security code field found — skipping CAPTCHA step');
     }
 
     // Step 7: Click Login button
