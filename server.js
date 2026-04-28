@@ -8,6 +8,38 @@ const express    = require('express');
 const cors       = require('cors');
 const puppeteer  = require('puppeteer-core');
 
+// Claude Vision API for CAPTCHA reading
+async function readCaptcha(captchaBase64) {
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-opus-4-5',
+        max_tokens: 100,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: captchaBase64 } },
+            { type: 'text', text: 'This is a CAPTCHA image. Read the security code numbers/letters shown and reply with ONLY the code, nothing else. No spaces, no explanation.' }
+          ]
+        }]
+      })
+    });
+    const data = await response.json();
+    const code = data.content?.[0]?.text?.trim() || '';
+    console.log('🤖 Claude read CAPTCHA:', code);
+    return code;
+  } catch(e) {
+    console.error('CAPTCHA read failed:', e.message);
+    return null;
+  }
+}
+
 const app  = express();
 const PORT = process.env.PORT || 3001;
 console.log('Starting on PORT:', PORT);
@@ -48,8 +80,6 @@ async function launchBrowser() {
 
 // ── LOGIN TO FTA PORTAL — credentials passed per request ──────────────────────
 async function loginToFTA(username, password) {
-  // Accept credentials from request — not env vars
-  // This allows multiple FTA accounts managed from the portal
   const ftaUser = username || process.env.FTA_USERNAME;
   const ftaPass = password || process.env.FTA_PASSWORD;
 
@@ -57,12 +87,11 @@ async function loginToFTA(username, password) {
     return { success: false, error: 'FTA credentials not provided. Enter username and password in the portal.' };
   }
 
-  // Check if already logged in with same user
+  // Check if already logged in
   if (isLoggedIn) {
     try {
-      await page.goto(FTA_URL, { waitUntil: 'networkidle2', timeout: 15000 });
       const url = page.url();
-      if (!url.includes('Logon') && !url.includes('login')) {
+      if (!url.includes('Logon') && !url.includes('login') && !url.includes('UAE_PASS')) {
         console.log('✅ Session still active');
         return { success: true, message: 'Session active' };
       }
@@ -70,60 +99,182 @@ async function loginToFTA(username, password) {
     isLoggedIn = false;
   }
 
-  console.log('🔐 Logging into FTA portal as:', ftaUser.slice(0,5) + '***');
+  console.log('🔐 Navigating to FTA portal as:', ftaUser.slice(0,5) + '***');
+
   try {
-    await page.goto(FTA_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+    // Step 1: Go to FTA portal
+    await page.goto('https://eservices.tax.gov.ae/#/Logon', {
+      waitUntil: 'networkidle2', timeout: 30000
+    });
+    await page.waitForTimeout(3000);
+    console.log('📄 FTA page loaded. URL:', page.url());
+
+    // Take screenshot to see what we have
+    const shot1 = await page.screenshot({ encoding: 'base64' });
+    console.log('📸 Initial screenshot taken');
+
+    // Step 2: Click "Login here" (Non UAE PASS users link)
+    // Try multiple selectors for this link
+    const loginLinkSelectors = [
+      'a[href*="login"]',
+      'a:contains("Login here")',
+      'a[href*="Logon"]',
+      '.login-link',
+      'a[ng-click*="login"]',
+    ];
+
+    let clicked = false;
+
+    // Use page.evaluate to find and click the "Login here" link
+    clicked = await page.evaluate(() => {
+      // Find all links and look for "Login here" text
+      const links = Array.from(document.querySelectorAll('a'));
+      const loginLink = links.find(a =>
+        a.textContent.includes('Login here') ||
+        a.textContent.includes('login here') ||
+        a.textContent.toLowerCase().includes('non uae pass') ||
+        a.href.includes('username') ||
+        a.href.includes('credentials')
+      );
+      if (loginLink) {
+        loginLink.click();
+        return true;
+      }
+      return false;
+    });
+
+    if (!clicked) {
+      // Try XPath
+      const [loginHereLink] = await page.$x('//a[contains(text(), "Login here") or contains(text(), "login here")]');
+      if (loginHereLink) {
+        await loginHereLink.click();
+        clicked = true;
+        console.log('✅ Clicked Login here via XPath');
+      }
+    }
+
+    if (!clicked) {
+      console.log('⚠️ Could not find Login here link — trying direct URL');
+      // Try navigating directly to the credentials login page
+      await page.goto('https://eservices.tax.gov.ae/#/Logon', { waitUntil: 'networkidle2', timeout: 15000 });
+    }
+
     await page.waitForTimeout(2000);
+    console.log('📄 After clicking Login here. URL:', page.url());
 
-    await page.waitForSelector('input[type="text"], input[type="email"], input[id*="user"], input[name*="user"]', { timeout: 15000 });
+    // Step 3: Wait for username/password form to appear
+    try {
+      await page.waitForSelector('input[type="text"], input[type="email"], input[name*="user"], input[id*="user"], input[placeholder*="user"], input[placeholder*="email"]',
+        { timeout: 10000 });
+    } catch {
+      console.log('⚠️ No text input found after clicking Login here');
+      // Take screenshot to see current state
+      const shot2 = await page.screenshot({ encoding: 'base64' });
+      console.log('📸 Screenshot after login click taken');
+    }
 
-    // Fill username/email
-    const usernameField = await page.$('input[type="email"]') ||
-                          await page.$('input[type="text"]') ||
-                          await page.$('input[id*="username"]') ||
-                          await page.$('input[name*="username"]');
-    if (!usernameField) throw new Error('Username field not found on FTA page');
-    await usernameField.click({ clickCount: 3 });
-    await usernameField.type(ftaUser, { delay: 80 });
+    // Step 4: Fill email
+    const emailField = await page.$('input[type="email"]') ||
+                       await page.$('input[placeholder*="E-Mail"]') ||
+                       await page.$('input[placeholder*="email"]') ||
+                       await page.$('input[placeholder*="Email"]') ||
+                       await page.$('input[type="text"]');
 
-    // Fill password
+    if (!emailField) {
+      const pageText = await page.evaluate(() => document.body.innerText.slice(0,300));
+      throw new Error('Email field not found. Page: ' + pageText);
+    }
+    await emailField.click({ clickCount: 3 });
+    await emailField.type(ftaUser, { delay: 100 });
+    console.log('✅ Email filled');
+
+    // Step 5: Fill password
     const passwordField = await page.$('input[type="password"]');
-    if (!passwordField) throw new Error('Password field not found on FTA page');
+    if (!passwordField) throw new Error('Password field not found');
     await passwordField.click({ clickCount: 3 });
-    await passwordField.type(ftaPass, { delay: 80 });
+    await passwordField.type(ftaPass, { delay: 100 });
+    console.log('✅ Password filled');
 
-    // Click login
+    // Step 6: Read and fill CAPTCHA using Claude Vision
+    await page.waitForTimeout(1000);
+    const captchaImg = await page.$('img') ||
+                       await page.$('[class*="captcha"] img') ||
+                       await page.$('canvas');
+
+    if (captchaImg) {
+      console.log('🔍 CAPTCHA detected — using Claude Vision to read it...');
+      // Screenshot just the captcha image
+      const captchaBase64 = await captchaImg.screenshot({ encoding: 'base64' });
+      const captchaCode   = await readCaptcha(captchaBase64);
+
+      if (captchaCode) {
+        const captchaInput = await page.$('input[placeholder*="Security"]') ||
+                             await page.$('input[placeholder*="security"]') ||
+                             await page.$('input[placeholder*="captcha"]') ||
+                             await page.$('input[placeholder*="Code"]') ||
+                             await page.$('input[id*="captcha"]');
+        if (captchaInput) {
+          await captchaInput.click({ clickCount: 3 });
+          await captchaInput.type(captchaCode, { delay: 100 });
+          console.log('✅ CAPTCHA filled:', captchaCode);
+        } else {
+          console.log('⚠️ CAPTCHA input field not found');
+        }
+      } else {
+        console.log('⚠️ Could not read CAPTCHA — trying without it');
+      }
+    } else {
+      console.log('ℹ️ No CAPTCHA detected');
+    }
+
+    // Step 7: Click Login button
     const loginBtn = await page.$('button[type="submit"]') ||
                      await page.$('input[type="submit"]') ||
-                     await page.$('button[id*="login"]') ||
-                     await page.$('button[class*="login"]');
-    if (!loginBtn) throw new Error('Login button not found');
-    await loginBtn.click();
+                     await page.$('button:contains("Login")') ||
+                     await page.evaluateHandle(() => {
+                       const btns = Array.from(document.querySelectorAll('button'));
+                       return btns.find(b => b.textContent.includes('Login'));
+                     });
 
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
-    await page.waitForTimeout(2000);
+    if (!loginBtn || !loginBtn.asElement()) throw new Error('Login button not found');
+    await (loginBtn.asElement ? loginBtn.asElement().click() : loginBtn.click());
+    console.log('✅ Login button clicked');
 
-    const afterUrl = page.url();
-    if (afterUrl.includes('Logon') || afterUrl.includes('login')) {
-      const errorMsg = await page.$eval(
-        '[class*="error"], [class*="alert"], [class*="invalid"]',
-        el => el.textContent.trim()
-      ).catch(() => 'Invalid credentials or login failed');
-      throw new Error(errorMsg);
+    // Step 6: Wait for navigation
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(3000);
+
+    const finalUrl = page.url();
+    console.log('📄 Final URL:', finalUrl);
+
+    if (finalUrl.includes('Logon') || finalUrl.includes('login') || finalUrl.includes('UAE_PASS')) {
+      // Still on login page — check error
+      const errText = await page.evaluate(() => {
+        const errEl = document.querySelector('[class*="error"], [class*="alert"], [class*="invalid"], [class*="wrong"]');
+        return errEl ? errEl.textContent.trim() : null;
+      });
+      throw new Error(errText || 'Login failed — still on login page. Check credentials.');
     }
 
     isLoggedIn = true;
     currentFtaUser = ftaUser;
     lastActivity = Date.now();
-    console.log('✅ Logged into FTA portal. URL:', afterUrl);
+    console.log('✅ FTA login successful!');
     return { success: true, message: 'Logged in to FTA portal successfully' };
 
   } catch (err) {
     isLoggedIn = false;
-    console.error('❌ FTA login failed:', err.message);
-    return { success: false, error: err.message };
+    console.error('❌ FTA login error:', err.message);
+    // Take screenshot on failure
+    try {
+      const failShot = await page.screenshot({ encoding: 'base64' });
+      return { success: false, error: err.message, screenshot: 'data:image/png;base64,' + failShot };
+    } catch {
+      return { success: false, error: err.message };
+    }
   }
 }
+
 
 // ── SEARCH CLIENT BY TRN ─────────────────────────────────────────────────────
 async function searchClientByTRN(trn) {
