@@ -466,6 +466,219 @@ async function scrapeComplianceData(trn) {
   }
 }
 
+
+// ── SEARCH CLIENT BY NAME OR TRN ─────────────────────────────────────────────
+async function searchAndScrapeClient(nameOrTrn) {
+  console.log('🔍 Searching FTA for:', nameOrTrn);
+
+  try {
+    // Navigate to Taxable Person List
+    await page.goto('https://eservices.tax.gov.ae/#/taxagent/taxable-persons', {
+      waitUntil: 'networkidle2', timeout: 15000
+    }).catch(() => {});
+    await page.waitForTimeout(2000);
+
+    // Find and use the search box
+    const searchBox = await page.$('input[placeholder*="Search"], input[placeholder*="TRN"], input[placeholder*="search"], .search-input input, input[type="search"]');
+
+    if (searchBox) {
+      await searchBox.click({ clickCount: 3 });
+      await searchBox.type(nameOrTrn, { delay: 50 });
+      await page.waitForTimeout(500);
+
+      // Click Search button
+      const searchBtn = await page.$('button[class*="search"], .search-btn, button[type="submit"]') ||
+                        await page.evaluateHandle(() => {
+                          const btns = Array.from(document.querySelectorAll('button'));
+                          return btns.find(b => b.textContent.trim().toLowerCase() === 'search');
+                        });
+      if (searchBtn && searchBtn.asElement) await searchBtn.asElement()?.click();
+      else if (searchBox) await searchBox.press('Enter');
+
+      await page.waitForTimeout(3000);
+      console.log('✅ Search executed for:', nameOrTrn);
+    } else {
+      // Try current page search if already on taxable person list
+      const currentPageSearch = await page.$('input[placeholder*="Number or Taxable"]') ||
+                                await page.$('.search-field input') ||
+                                await page.$('input.ng-pristine');
+      if (currentPageSearch) {
+        await currentPageSearch.click({ clickCount: 3 });
+        await currentPageSearch.type(nameOrTrn, { delay: 50 });
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(3000);
+      }
+    }
+
+    // Take screenshot to see results
+    const searchShot = await page.screenshot({ encoding: 'base64' });
+
+    // Find View buttons and client cards in results
+    const results = await page.evaluate((query) => {
+      const items = [];
+
+      // Look for client cards/rows
+      const cards = document.querySelectorAll('[class*="taxable-person"], [class*="person-card"], .list-item, tr');
+      cards.forEach(card => {
+        const text = card.innerText || '';
+        const viewBtn = card.querySelector('button, a');
+        if (text.trim() && viewBtn) {
+          items.push({ text: text.trim().slice(0, 200), hasView: true });
+        }
+      });
+
+      // Also look for any visible "View" buttons
+      const viewBtns = Array.from(document.querySelectorAll('button')).filter(b =>
+        b.innerText.trim().toLowerCase() === 'view'
+      );
+
+      return {
+        resultCount: viewBtns.length,
+        items: items.slice(0, 5),
+        pageText: document.body.innerText.slice(0, 1000),
+        hasResults: viewBtns.length > 0
+      };
+    }, nameOrTrn);
+
+    console.log('📊 Search results:', results.resultCount, 'View buttons found');
+
+    if (results.hasResults) {
+      // Click the first View button
+      const clicked = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const viewBtn = btns.find(b => b.innerText.trim().toLowerCase() === 'view');
+        if (viewBtn) { viewBtn.click(); return true; }
+        return false;
+      });
+
+      if (clicked) {
+        console.log('✅ Clicked View for first result');
+        await page.waitForTimeout(4000);
+        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+      }
+    }
+
+    // Scrape the client profile page
+    const profileData = await scrapeClientProfile();
+    const profileShot = await page.screenshot({ encoding: 'base64' });
+
+    return {
+      success: true,
+      searchQuery: nameOrTrn,
+      resultCount: results.resultCount,
+      profile: profileData,
+      screenshot: 'data:image/png;base64,' + profileShot,
+      searchScreenshot: 'data:image/png;base64,' + searchShot
+    };
+
+  } catch(err) {
+    console.error('❌ Search error:', err.message);
+    const errShot = await page.screenshot({ encoding: 'base64' }).catch(() => null);
+    return {
+      success: false,
+      error: err.message,
+      screenshot: errShot ? 'data:image/png;base64,' + errShot : null
+    };
+  }
+}
+
+// ── SCRAPE FULL CLIENT PROFILE ────────────────────────────────────────────────
+async function scrapeClientProfile() {
+  const data = {
+    url: page.url(),
+    scrapedAt: new Date().toISOString(),
+    basicInfo: {},
+    vatReturns: [],
+    ctReturns: [],
+    penalties: [],
+    correspondence: [],
+    registrations: {},
+    rawSections: {}
+  };
+
+  try {
+    // Get all page text
+    const pageContent = await page.evaluate(() => {
+      const result = {};
+
+      // Try to find structured data in the page
+      // Basic info section
+      const infoRows = document.querySelectorAll('tr, .info-row, .detail-row, [class*="field"]');
+      const basicInfo = {};
+      infoRows.forEach(row => {
+        const cells = row.querySelectorAll('td, .label, .value, span');
+        if (cells.length >= 2) {
+          const key = cells[0].innerText?.trim();
+          const val = cells[1].innerText?.trim();
+          if (key && val && key.length < 60) basicInfo[key] = val;
+        }
+      });
+      result.basicInfo = basicInfo;
+
+      // VAT returns table
+      const tables = document.querySelectorAll('table');
+      const tableData = [];
+      tables.forEach((table, i) => {
+        const rows = [];
+        table.querySelectorAll('tr').forEach(row => {
+          const cells = Array.from(row.querySelectorAll('td, th')).map(c => c.innerText.trim());
+          if (cells.length > 0) rows.push(cells);
+        });
+        if (rows.length > 0) tableData.push({ tableIndex: i, rows: rows.slice(0, 20) });
+      });
+      result.tables = tableData;
+
+      // Check for penalties
+      const penaltyText = document.body.innerText.toLowerCase();
+      result.hasPenalties = penaltyText.includes('penalty') || penaltyText.includes('fine') || penaltyText.includes('violation');
+      result.hasOutstanding = penaltyText.includes('outstanding') || penaltyText.includes('overdue') || penaltyText.includes('pending');
+
+      // Page sections/tabs
+      const tabs = Array.from(document.querySelectorAll('[class*="tab"], nav a, .menu-item')).map(t => t.innerText.trim()).filter(t => t.length > 0 && t.length < 50);
+      result.availableTabs = [...new Set(tabs)];
+
+      // Full page text for analysis
+      result.fullText = document.body.innerText.slice(0, 3000);
+
+      return result;
+    });
+
+    data.basicInfo = pageContent.basicInfo;
+    data.rawSections = pageContent.tables;
+    data.hasPenalties = pageContent.hasPenalties;
+    data.hasOutstanding = pageContent.hasOutstanding;
+    data.availableTabs = pageContent.availableTabs;
+    data.rawText = pageContent.fullText;
+
+    // Try to click through tabs to get more data
+    const importantTabs = ['VAT', 'Returns', 'Corporate Tax', 'Penalties', 'Correspondence', 'Registration'];
+    for (const tabName of importantTabs) {
+      const tabClicked = await page.evaluate((name) => {
+        const tabs = Array.from(document.querySelectorAll('[class*="tab"], .nav-item, .menu-item, a, button'));
+        const tab = tabs.find(t => t.innerText.toLowerCase().includes(name.toLowerCase()));
+        if (tab) { tab.click(); return true; }
+        return false;
+      }, tabName);
+
+      if (tabClicked) {
+        await page.waitForTimeout(1500);
+        const tabContent = await page.evaluate(() => document.body.innerText.slice(0, 1000));
+        data.rawSections[tabName] = tabContent;
+        console.log(`📑 Tab '${tabName}' data captured`);
+      }
+    }
+
+    console.log('✅ Profile scraped successfully');
+  } catch(e) {
+    console.error('Profile scrape error:', e.message);
+    data.error = e.message;
+  }
+
+  return data;
+}
+
+
 // ── API MIDDLEWARE ────────────────────────────────────────────────────────────
 function authenticate(req, res, next) {
   const key = req.headers['x-api-key'] || req.query.api_key;
@@ -531,6 +744,43 @@ app.get('/api/status', authenticate, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+// Search client by name or TRN and scrape their FTA profile
+app.post('/api/search-client', authenticate, async (req, res) => {
+  const { nameOrTrn } = req.body || {};
+  if (!nameOrTrn) return res.status(400).json({ error: 'Provide nameOrTrn' });
+  if (!isLoggedIn) return res.status(401).json({ error: 'Not logged in to FTA. Call /api/login first.' });
+
+  try {
+    lastActivity = Date.now();
+    const result = await searchAndScrapeClient(nameOrTrn);
+    res.json(result);
+  } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Batch sync multiple clients
+app.post('/api/sync-clients', authenticate, async (req, res) => {
+  const { clients } = req.body || {}; // [{ id, name, trn }]
+  if (!clients?.length) return res.status(400).json({ error: 'Provide clients array' });
+  if (!isLoggedIn) return res.status(401).json({ error: 'Not logged in to FTA' });
+
+  const results = {};
+  for (const client of clients.slice(0, 5)) { // max 5 per batch
+    const query = client.trn || client.name;
+    console.log(`🔄 Syncing: ${client.name} (${query})`);
+    try {
+      results[client.id] = await searchAndScrapeClient(query);
+      await page.waitForTimeout(2000); // polite delay between clients
+    } catch(e) {
+      results[client.id] = { success: false, error: e.message };
+    }
+  }
+  res.json({ success: true, results, count: Object.keys(results).length });
+});
+
 
 // Search client by TRN and return compliance data
 app.get('/api/client/:trn', authenticate, async (req, res) => {
