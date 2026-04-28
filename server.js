@@ -253,46 +253,11 @@ async function loginToFTA(username, password) {
       console.log('ℹ️ No security code field found — skipping CAPTCHA step');
     }
 
-    // Step 7: Click Login button
-    await page.waitForTimeout(500);
+    // Step 7: Submit form — press Enter (most reliable across all web forms)
+    await page.waitForTimeout(300);
+    await page.keyboard.press('Enter');
+    console.log('✅ Pressed Enter to submit login form');
 
-    // Use page.evaluate to find and click the Login button by text
-    const loginClicked = await page.evaluate(() => {
-      // Try button with text "Login"
-      const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-      const loginBtn = btns.find(b =>
-        b.textContent.trim() === 'Login' ||
-        b.value === 'Login' ||
-        b.textContent.toLowerCase().includes('login') ||
-        b.className.toLowerCase().includes('login')
-      );
-      if (loginBtn) { loginBtn.click(); return true; }
-      return false;
-    });
-
-    if (loginClicked) {
-      console.log('✅ Login button clicked via evaluate');
-    } else {
-      // Fallback: try direct selector
-      const loginBtn = await page.$('button[type="submit"]') ||
-                       await page.$('input[type="submit"]') ||
-                       await page.$('.login-btn') ||
-                       await page.$('#loginBtn');
-
-      if (loginBtn) {
-        await loginBtn.click();
-        console.log('✅ Login button clicked via selector');
-      } else {
-        // Last resort: press Enter in the security code field
-        if (captchaInput) {
-          await captchaInput.press('Enter');
-          console.log('✅ Pressed Enter to submit form');
-        } else {
-          throw new Error('Could not find or click Login button');
-        }
-      }
-    }
-    console.log('✅ Login submitted');
 
     // Step 6: Wait for navigation
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
