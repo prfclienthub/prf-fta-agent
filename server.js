@@ -246,23 +246,42 @@ async function loginToFTA(username, password) {
       }
     }
 
-    // Click Login button immediately — no delay
-    const loginClicked = await page.evaluate(() => {
+    // Click Login button using real mouse coordinates — most reliable for Angular
+    await page.waitForTimeout(300);
+
+    // Find the Login button and get its position
+    const loginBtnBox = await page.evaluate(() => {
       for (const el of document.querySelectorAll('button')) {
         if (el.innerText.trim().toLowerCase() === 'login') {
-          el.click();
-          return true;
+          const r = el.getBoundingClientRect();
+          return { x: r.left + r.width/2, y: r.top + r.height/2, found: true };
         }
       }
-      const sub = document.querySelector('button[type="submit"], input[type="submit"]');
-      if (sub) { sub.click(); return true; }
-      return false;
+      const sub = document.querySelector('button[type="submit"]');
+      if (sub) {
+        const r = sub.getBoundingClientRect();
+        return { x: r.left + r.width/2, y: r.top + r.height/2, found: true };
+      }
+      return { found: false };
     });
 
-    if (!loginClicked) {
-      // XPath fallback
+    if (loginBtnBox.found) {
+      // Move mouse to button then click — simulates real user interaction
+      await page.mouse.move(loginBtnBox.x, loginBtnBox.y);
+      await page.waitForTimeout(100);
+      await page.mouse.click(loginBtnBox.x, loginBtnBox.y);
+      console.log('✅ Login button clicked via mouse at:', loginBtnBox.x, loginBtnBox.y);
+    } else {
+      // Fallback: XPath click
       const [xbtn] = await page.$x('//button[contains(text(),"Login")]');
-      if (xbtn) await xbtn.click();
+      if (xbtn) {
+        await xbtn.click();
+        console.log('✅ Login clicked via XPath');
+      } else {
+        // Last resort: Enter key
+        await page.keyboard.press('Enter');
+        console.log('✅ Pressed Enter as final fallback');
+      }
     }
 
     console.log('✅ Login submitted, waiting for response...');
