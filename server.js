@@ -400,7 +400,7 @@ setInterval(async () => {
 // ── START SERVER ──────────────────────────────────────────────────────────────
 app.listen(PORT, async () => {
   console.log(`\n🏢 PRF FTA Agent running on port ${PORT}`);
-  console.log(`📋 FTA User: ${FTA_USER ? FTA_USER.slice(0,5)+'***' : '⚠️ NOT SET'}`);
+  console.log(`📋 FTA credentials: Managed from ClientHub portal (not stored on server)`);
   console.log(`🔑 API Key: ${API_KEY ? '✅ Set' : '⚠️ NOT SET — all requests allowed'}`);
   console.log(`\n📡 Endpoints:`);
   console.log(`   GET  /health`);
