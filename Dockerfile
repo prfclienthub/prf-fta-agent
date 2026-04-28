@@ -1,4 +1,3 @@
-# Use official Puppeteer-ready image — Chrome pre-installed, no download needed
 FROM ghcr.io/puppeteer/puppeteer:21.0.0
 
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
@@ -7,16 +6,13 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 
 WORKDIR /app
 
-# Copy package files
 COPY package.json ./
-
-# Install dependencies (puppeteer-core only — no Chrome download)
 RUN npm install --omit=dev
 
-# Copy source
 COPY server.js ./
 COPY .env.example ./
 
-EXPOSE 3001
+# Railway sets PORT automatically — expose it
+EXPOSE $PORT
 
 CMD ["node", "server.js"]

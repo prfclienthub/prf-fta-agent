@@ -10,6 +10,7 @@ const puppeteer  = require('puppeteer-core');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
+console.log('Starting on PORT:', PORT);
 
 app.use(cors({ origin: process.env.PORTAL_URL || '*' }));
 app.use(express.json());
@@ -244,13 +245,19 @@ function authenticate(req, res, next) {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({
-    status:      'ok',
-    browserReady: !!browser,
-    loggedIn:    isLoggedIn,
-    lastActivity: new Date(lastActivity).toISOString(),
-    fta_user:    FTA_USER ? FTA_USER.slice(0, 5) + '***' : 'not set'
+  res.status(200).json({
+    status:       'ok',
+    browserReady:  !!browser,
+    loggedIn:      isLoggedIn,
+    lastActivity:  new Date(lastActivity).toISOString(),
+    fta_user:      FTA_USER ? FTA_USER.slice(0, 5) + '***' : 'not set',
+    port:          PORT
   });
+});
+
+// Root route — Railway sometimes checks /
+app.get('/', (req, res) => {
+  res.status(200).json({ status: 'ok', service: 'PRF FTA Agent' });
 });
 
 // Login to FTA portal
@@ -394,13 +401,7 @@ app.listen(PORT, async () => {
   console.log(`   POST /api/scan-batch`);
   console.log(`   GET  /api/screenshot\n`);
 
-  // Auto-start browser and login
-  try {
-    await launchBrowser();
-    console.log('🔐 Auto-logging into FTA...');
-    const result = await loginToFTA();
-    console.log(result.success ? '✅ FTA login ready' : '⚠️ FTA login failed — will retry on first request');
-  } catch (err) {
-    console.log('⚠️ Browser startup error:', err.message);
-  }
+  // Browser launches on first API request — not on startup
+  // This lets Railway health check pass immediately
+  console.log('⏳ Browser will launch on first /api/login request');
 });
