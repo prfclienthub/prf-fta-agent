@@ -9,3 +9,6 @@ startCommand = "node server.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "on_failure"
+
+[deploy.variables]
+PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"
