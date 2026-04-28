@@ -253,10 +253,59 @@ async function loginToFTA(username, password) {
       console.log('ℹ️ No security code field found — skipping CAPTCHA step');
     }
 
-    // Step 7: Submit form — press Enter (most reliable across all web forms)
-    await page.waitForTimeout(300);
-    await page.keyboard.press('Enter');
-    console.log('✅ Pressed Enter to submit login form');
+    // Step 7: Click Login button — multiple strategies for Angular portal
+    await page.waitForTimeout(500);
+
+    let loginSubmitted = false;
+
+    // Strategy 1: XPath by exact button text
+    try {
+      const [btn] = await page.$x('//button[contains(text(),"Login") or contains(text(),"login") or contains(text(),"LOG IN")]');
+      if (btn) {
+        await btn.click();
+        loginSubmitted = true;
+        console.log('✅ Login clicked via XPath text search');
+      }
+    } catch(e) { console.log('XPath click failed:', e.message); }
+
+    // Strategy 2: Find by class or type and click via evaluate
+    if (!loginSubmitted) {
+      loginSubmitted = await page.evaluate(() => {
+        const selectors = [
+          'button[type="submit"]',
+          'input[type="submit"]',
+          'button.btn-login',
+          'button.login',
+          'button.btn-primary',
+          '.login-btn button',
+          'form button:last-child',
+        ];
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el) { el.click(); return true; }
+        }
+        // Find any button whose visible text is Login
+        for (const el of document.querySelectorAll('button')) {
+          if (el.innerText.trim().toLowerCase() === 'login') {
+            el.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (loginSubmitted) console.log('✅ Login clicked via evaluate');
+    }
+
+    // Strategy 3: Tab to button and press Enter
+    if (!loginSubmitted) {
+      await page.keyboard.press('Tab');
+      await page.waitForTimeout(200);
+      await page.keyboard.press('Enter');
+      loginSubmitted = true;
+      console.log('✅ Tabbed to button and pressed Enter');
+    }
+
+    console.log('Login submission attempted, loginSubmitted:', loginSubmitted);
 
 
     // Step 6: Wait for navigation
