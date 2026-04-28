@@ -19,12 +19,11 @@ app.use(express.json());
 let browser     = null;
 let page        = null;
 let isLoggedIn  = false;
+let currentFtaUser = null;
 let lastActivity = Date.now();
 
-const FTA_URL    = 'https://eservices.tax.gov.ae/#/Logon';
-const FTA_USER   = process.env.FTA_USERNAME;   // PRF's one FTA login
-const FTA_PASS   = process.env.FTA_PASSWORD;   // PRF's FTA password
-const API_KEY    = process.env.AGENT_API_KEY;  // Secret key portal uses to call this
+const FTA_URL = 'https://eservices.tax.gov.ae/#/Logon';
+const API_KEY = process.env.AGENT_API_KEY; // Secret key — set in Railway Variables
 
 // ── LAUNCH BROWSER ────────────────────────────────────────────────────────────
 async function launchBrowser() {
@@ -47,10 +46,19 @@ async function launchBrowser() {
   console.log('✅ Browser ready');
 }
 
-// ── LOGIN TO FTA PORTAL ───────────────────────────────────────────────────────
-async function loginToFTA() {
+// ── LOGIN TO FTA PORTAL — credentials passed per request ──────────────────────
+async function loginToFTA(username, password) {
+  // Accept credentials from request — not env vars
+  // This allows multiple FTA accounts managed from the portal
+  const ftaUser = username || process.env.FTA_USERNAME;
+  const ftaPass = password || process.env.FTA_PASSWORD;
+
+  if (!ftaUser || !ftaPass) {
+    return { success: false, error: 'FTA credentials not provided. Enter username and password in the portal.' };
+  }
+
+  // Check if already logged in with same user
   if (isLoggedIn) {
-    // Check if session still alive
     try {
       await page.goto(FTA_URL, { waitUntil: 'networkidle2', timeout: 15000 });
       const url = page.url();
@@ -62,29 +70,29 @@ async function loginToFTA() {
     isLoggedIn = false;
   }
 
-  console.log('🔐 Logging into FTA portal...');
+  console.log('🔐 Logging into FTA portal as:', ftaUser.slice(0,5) + '***');
   try {
     await page.goto(FTA_URL, { waitUntil: 'networkidle2', timeout: 30000 });
     await page.waitForTimeout(2000);
 
-    // Wait for login form
-    await page.waitForSelector('input[type="text"], input[id*="user"], input[name*="user"], input[placeholder*="user"]', { timeout: 15000 });
+    await page.waitForSelector('input[type="text"], input[type="email"], input[id*="user"], input[name*="user"]', { timeout: 15000 });
 
-    // Fill username
-    const usernameField = await page.$('input[type="text"]') ||
+    // Fill username/email
+    const usernameField = await page.$('input[type="email"]') ||
+                          await page.$('input[type="text"]') ||
                           await page.$('input[id*="username"]') ||
                           await page.$('input[name*="username"]');
-    if (!usernameField) throw new Error('Username field not found');
+    if (!usernameField) throw new Error('Username field not found on FTA page');
     await usernameField.click({ clickCount: 3 });
-    await usernameField.type(FTA_USER, { delay: 80 });
+    await usernameField.type(ftaUser, { delay: 80 });
 
     // Fill password
     const passwordField = await page.$('input[type="password"]');
-    if (!passwordField) throw new Error('Password field not found');
+    if (!passwordField) throw new Error('Password field not found on FTA page');
     await passwordField.click({ clickCount: 3 });
-    await passwordField.type(FTA_PASS, { delay: 80 });
+    await passwordField.type(ftaPass, { delay: 80 });
 
-    // Click login button
+    // Click login
     const loginBtn = await page.$('button[type="submit"]') ||
                      await page.$('input[type="submit"]') ||
                      await page.$('button[id*="login"]') ||
@@ -92,24 +100,23 @@ async function loginToFTA() {
     if (!loginBtn) throw new Error('Login button not found');
     await loginBtn.click();
 
-    // Wait for navigation
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 });
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
     await page.waitForTimeout(2000);
 
     const afterUrl = page.url();
     if (afterUrl.includes('Logon') || afterUrl.includes('login')) {
-      // Still on login page — check for error message
       const errorMsg = await page.$eval(
-        '[class*="error"], [class*="alert"], [class*="message"]',
+        '[class*="error"], [class*="alert"], [class*="invalid"]',
         el => el.textContent.trim()
-      ).catch(() => 'Login failed — check credentials');
+      ).catch(() => 'Invalid credentials or login failed');
       throw new Error(errorMsg);
     }
 
     isLoggedIn = true;
+    currentFtaUser = ftaUser;
     lastActivity = Date.now();
     console.log('✅ Logged into FTA portal. URL:', afterUrl);
-    return { success: true, message: 'Logged in successfully' };
+    return { success: true, message: 'Logged in to FTA portal successfully' };
 
   } catch (err) {
     isLoggedIn = false;
@@ -246,12 +253,13 @@ function authenticate(req, res, next) {
 // Health check
 app.get('/health', (req, res) => {
   res.status(200).json({
-    status:       'ok',
+    status:        'ok',
     browserReady:  !!browser,
     loggedIn:      isLoggedIn,
+    currentUser:   currentFtaUser ? currentFtaUser.slice(0,5) + '***' : null,
     lastActivity:  new Date(lastActivity).toISOString(),
-    fta_user:      FTA_USER ? FTA_USER.slice(0, 5) + '***' : 'not set',
-    port:          PORT
+    port:          PORT,
+    ready:         true
   });
 });
 
@@ -260,11 +268,12 @@ app.get('/', (req, res) => {
   res.status(200).json({ status: 'ok', service: 'PRF FTA Agent' });
 });
 
-// Login to FTA portal
+// Login to FTA portal — credentials sent from portal, not stored on server
 app.post('/api/login', authenticate, async (req, res) => {
   try {
+    const { username, password } = req.body || {};
     await launchBrowser();
-    const result = await loginToFTA();
+    const result = await loginToFTA(username, password);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
