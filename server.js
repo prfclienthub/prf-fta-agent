@@ -12,7 +12,7 @@ const app  = express();
 const PORT = process.env.PORT || 3001;
 console.log('Starting on PORT:', PORT);
 
-app.use(cors({ origin: process.env.PORTAL_URL || '*' }));
+app.use(cors()); // Allow all origins
 app.use(express.json());
 
 // ── BROWSER STATE ─────────────────────────────────────────────────────────────
